@@ -282,28 +282,42 @@ def train(hyp, opt, device, callbacks):
         LOGGER.info("Using SyncBatchNorm()")
 
     # Trainloader
+    '''
+    hyp = {
+    'lr0': 0.01,                # 初始学习率
+    'lrf': 0.01,                # 学习率衰减最终比率
+    'momentum': 0.937,          # 动量
+    'weight_decay': 0.0005,     # 权重衰减
+    'warmup_epochs': 3.0,       # 预热轮数
+    'box': 0.05,                # box损失权重
+    'cls': 0.5,                 # 分类损失权重
+    'obj': 1.0,                 # 置信度损失权重
+    'fl_gamma': 0.0,            # Focal loss gamma
+    ...
+    }
+    '''
     train_loader, dataset = create_dataloader(
         train_path,
         imgsz,
-        batch_size // WORLD_SIZE,
-        gs,
-        single_cls,
-        hyp=hyp,
-        augment=True,
-        cache=None if opt.cache == "val" else opt.cache,
-        rect=opt.rect,
-        rank=LOCAL_RANK,
-        workers=workers,
-        image_weights=opt.image_weights,
-        quad=opt.quad,
-        prefix=colorstr("train: "),
-        shuffle=True,
-        seed=opt.seed,
+        batch_size // WORLD_SIZE, #WORLD_SIZE 进程数,通常为GPU数量
+        gs, #“grid size”（网格尺寸），gs 会被用于将图像的长宽 “对齐”，YOLOv5 使用了 FPN/PAN 架构，其输出特征图尺度通常是输入图像大小的 1/32
+        single_cls, #是否单一类别 False 例如行人检测（只关心有没有人，不分年龄性别）
+        hyp=hyp, #超参数
+        augment=True,#是否图像增强->YOLO5是用BOF，图像增强，包括旋转，缩放等
+        cache=None if opt.cache == "val" else opt.cache, #图像缓存
+        rect=opt.rect,#是否启用矩形训练，启用会按图像的长宽比自动分组，并为每组设置最合适的矩形尺寸
+        rank=LOCAL_RANK,#分布式训练下当前进程，gpu编号
+        workers=workers,#是用多少个子线程/进程加速
+        image_weights=opt.image_weights, #按图像的损失或重要性加权的参数，--image-weights 为 True，表示在训练过程中根据每个图像的损失动态调整图像权重
+        quad=opt.quad,#启用四点边界框（quad-box） 目标检测的参数，默认YOLOv5 使用矩形框（宽度、高度、中心坐标）来表示目标框，也可以是用四点边界框更好的拟合目标形状
+        prefix=colorstr("train: "),#日志前缀
+        shuffle=True,#每个数据训练周期 epoch打乱
+        seed=opt.seed,#随机种子，保证随机性可复现
     )
     labels = np.concatenate(dataset.labels, 0)
     mlc = int(labels[:, 0].max())  # max label class
     assert mlc < nc, f"Label class {mlc} exceeds nc={nc} in {data}. Possible class labels are 0-{nc - 1}"
-
+    #@todo 1.0 create_dataloader
     # Process 0
     if RANK in {-1, 0}:
         val_loader = create_dataloader(

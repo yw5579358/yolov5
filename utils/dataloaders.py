@@ -180,18 +180,19 @@ def create_dataloader(
     if rect and shuffle:
         LOGGER.warning("WARNING ⚠️ --rect is incompatible with DataLoader shuffle, setting shuffle=False")
         shuffle = False
-    with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
+    with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP 确保只有主进程（rank 0）执行某些操作
+        #@todo 1.1 load images and labels
         dataset = LoadImagesAndLabels(
             path,
             imgsz,
             batch_size,
-            augment=augment,  # augmentation
+            augment=augment,  # augmentation BOF数据增强
             hyp=hyp,  # hyperparameters
             rect=rect,  # rectangular batches
             cache_images=cache,
             single_cls=single_cls,
-            stride=int(stride),
-            pad=pad,
+            stride=int(stride),#步长，降采样过程是用
+            pad=pad,#边界padding
             image_weights=image_weights,
             prefix=prefix,
             rank=rank,
@@ -592,6 +593,7 @@ class LoadImagesAndLabels(Dataset):
             raise Exception(f"{prefix}Error loading data from {path}: {e}\n{HELP_URL}") from e
 
         # Check cache
+        #label加载，如果存在缓存文件，并且缓存versio相同，hash相同，则加载缓存文件
         self.label_files = img2label_paths(self.im_files)  # labels
         cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix(".cache")
         try:
@@ -772,7 +774,7 @@ class LoadImagesAndLabels(Dataset):
     def __getitem__(self, index):
         """Fetches the dataset item at the given index, considering linear, shuffled, or weighted sampling."""
         index = self.indices[index]  # linear, shuffled, or image_weights
-
+        # @todo 2.0 加载数据
         hyp = self.hyp
         if mosaic := self.mosaic and random.random() < hyp["mosaic"]:
             # Load mosaic
@@ -875,11 +877,12 @@ class LoadImagesAndLabels(Dataset):
         f = self.npy_files[i]
         if not f.exists():
             np.save(f.as_posix(), cv2.imread(self.im_files[i]))
-
+    # @todo 加载马赛克
     def load_mosaic(self, index):
         """Loads a 4-image mosaic for YOLOv5, combining 1 selected and 3 random images, with labels and segments."""
         labels4, segments4 = [], []
         s = self.img_size
+        #-320，2*640 + -320之间的随机中心点
         yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.mosaic_border)  # mosaic center x, y
         indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
         random.shuffle(indices)
