@@ -774,10 +774,11 @@ class LoadImagesAndLabels(Dataset):
     def __getitem__(self, index):
         """Fetches the dataset item at the given index, considering linear, shuffled, or weighted sampling."""
         index = self.indices[index]  # linear, shuffled, or image_weights
-        # @todo 2.0 加载数据
+        # @todo 2.0 加载数据 ,每一次训练，根据batch大小加载
         hyp = self.hyp
         if mosaic := self.mosaic and random.random() < hyp["mosaic"]:
             # Load mosaic
+            # @todo 2.1 加载马赛克
             img, labels = self.load_mosaic(index)
             shapes = None
 
@@ -811,6 +812,7 @@ class LoadImagesAndLabels(Dataset):
 
         nl = len(labels)  # number of labels
         if nl:
+            # 更改坐标格式
             labels[:, 1:5] = xyxy2xywhn(labels[:, 1:5], w=img.shape[1], h=img.shape[0], clip=True, eps=1e-3)
 
         if self.augment:
@@ -818,7 +820,7 @@ class LoadImagesAndLabels(Dataset):
             img, labels = self.albumentations(img, labels)
             nl = len(labels)  # update after albumentations
 
-            # HSV color-space
+            # HSV color-space  继续增强，饱和度，色调等变化
             augment_hsv(img, hgain=hyp["hsv_h"], sgain=hyp["hsv_s"], vgain=hyp["hsv_v"])
 
             # Flip up-down
@@ -838,10 +840,10 @@ class LoadImagesAndLabels(Dataset):
             # nl = len(labels)  # update after cutout
 
         labels_out = torch.zeros((nl, 6))
+
         if nl:
             labels_out[:, 1:] = torch.from_numpy(labels)
-
-        # Convert
+        # Convert 转换为pytorch使用的格式
         img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
         img = np.ascontiguousarray(img)
 
@@ -877,12 +879,12 @@ class LoadImagesAndLabels(Dataset):
         f = self.npy_files[i]
         if not f.exists():
             np.save(f.as_posix(), cv2.imread(self.im_files[i]))
-    # @todo 加载马赛克
+
     def load_mosaic(self, index):
         """Loads a 4-image mosaic for YOLOv5, combining 1 selected and 3 random images, with labels and segments."""
         labels4, segments4 = [], []
         s = self.img_size
-        #-320，2*640 + -320之间的随机中心点
+        #todo 2.1.1 生成中心点位置 -320，2*640 + -320之间的随机中心点
         yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.mosaic_border)  # mosaic center x, y
         indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
         random.shuffle(indices)
@@ -890,7 +892,7 @@ class LoadImagesAndLabels(Dataset):
             # Load image
             img, _, (h, w) = self.load_image(index)
 
-            # place img in img4
+            # todo 2.1.2 将四张图片放到生成图片中的不同位置，并获取小图片在大图片中的坐标，以及小图片可能被截断后的剩余部分的坐标
             if i == 0:  # top left
                 img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
                 x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
@@ -909,7 +911,7 @@ class LoadImagesAndLabels(Dataset):
             padw = x1a - x1b
             padh = y1a - y1b
 
-            # Labels
+            # todo 2.1.3 标签也要做相应的变化，在大图片中的位置
             labels, segments = self.labels[index].copy(), self.segments[index].copy()
             if labels.size:
                 labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)  # normalized xywh to pixel xyxy format
@@ -923,8 +925,8 @@ class LoadImagesAndLabels(Dataset):
             np.clip(x, 0, 2 * s, out=x)  # clip when using random_perspective()
         # img4, labels4 = replicate(img4, labels4)  # replicate
 
-        # Augment
         img4, labels4, segments4 = copy_paste(img4, labels4, segments4, p=self.hyp["copy_paste"])
+        # todo 2.2 数据增强
         img4, labels4 = random_perspective(
             img4,
             labels4,

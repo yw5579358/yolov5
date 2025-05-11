@@ -151,7 +151,25 @@ def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleF
     im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
     return im, ratio, (dw, dh)
 
+'''
+im: 输入图像，形状为 (h, w, c)
 
+targets: 每个目标的 [class, x1, y1, x2, y2] 边界框数据
+
+segments: 每个目标的多边形分割数据（用于分割任务）
+
+degrees: 随机旋转角度范围（±degrees 度）
+
+translate: 平移比例（相对宽/高）
+
+scale: 缩放比例变化范围（±scale）
+
+shear: 剪切角度范围（±shear 度）
+
+perspective: 透视变换系数（0 为纯仿射变换）
+
+border
+'''
 def random_perspective(
     im, targets=(), segments=(), degrees=10, translate=0.1, scale=0.1, shear=10, perspective=0.0, border=(0, 0)
 ):
@@ -161,17 +179,17 @@ def random_perspective(
     height = im.shape[0] + border[0] * 2  # shape(h,w,c)
     width = im.shape[1] + border[1] * 2
 
-    # Center
+    # todo 2.2.1 将图像坐标平移，使旋转/缩放围绕图像中心进行（而非左上角）
     C = np.eye(3)
     C[0, 2] = -im.shape[1] / 2  # x translation (pixels)
     C[1, 2] = -im.shape[0] / 2  # y translation (pixels)
 
-    # Perspective
+    # Perspective todo 2.2.2 引入轻微的“视角变化”（类似拍摄角度变化）
     P = np.eye(3)
     P[2, 0] = random.uniform(-perspective, perspective)  # x perspective (about y)
     P[2, 1] = random.uniform(-perspective, perspective)  # y perspective (about x)
 
-    # Rotation and Scale
+    # Rotation and Scale todo 2.2.3 图像随机旋转、放大/缩小
     R = np.eye(3)
     a = random.uniform(-degrees, degrees)
     # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
@@ -179,24 +197,24 @@ def random_perspective(
     # s = 2 ** random.uniform(-scale, scale)
     R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
 
-    # Shear
+    # Shear todo 2.2.4 将图像向 X 或 Y 轴方向倾斜
     S = np.eye(3)
     S[0, 1] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # x shear (deg)
     S[1, 0] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # y shear (deg)
 
-    # Translation
+    # Translation todo 2.2.5 图像整体平移到新位置（保证中心不出界）
     T = np.eye(3)
     T[0, 2] = random.uniform(0.5 - translate, 0.5 + translate) * width  # x translation (pixels)
     T[1, 2] = random.uniform(0.5 - translate, 0.5 + translate) * height  # y translation (pixels)
 
-    # Combined rotation matrix
+    # Combined rotation matrix todo 2.2.6 从右往左执行：先中心化，再透视、旋转缩放、剪切，最后平移。
     M = T @ S @ R @ P @ C  # order of operations (right to left) is IMPORTANT
     if (border[0] != 0) or (border[1] != 0) or (M != np.eye(3)).any():  # image changed
         if perspective:
             im = cv2.warpPerspective(im, M, dsize=(width, height), borderValue=(114, 114, 114))
         else:  # affine
             im = cv2.warpAffine(im, M[:2], dsize=(width, height), borderValue=(114, 114, 114))
-
+    # todo 2.2.7 targets 是边界框标签，形状为 (n, 5) → [cls, x1, y1, x2, y2] 数据变了，标签也要变
     if n := len(targets):
         use_segments = any(x.any() for x in segments) and len(segments) == n
         new = np.zeros((n, 4))

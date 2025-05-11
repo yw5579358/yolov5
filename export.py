@@ -974,7 +974,6 @@ def export_edgetpu(file, prefix=colorstr("Edge TPU:")):
     )
     return f, None
 
-
 @try_export
 def export_tfjs(file, int8, prefix=colorstr("TensorFlow.js:")):
     """
