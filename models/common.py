@@ -69,7 +69,7 @@ def autopad(k, p=None, d=1):
         p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
     return p
 
-
+# todo 3.1 卷积层
 class Conv(nn.Module):
     """Applies a convolution, batch normalization, and activation function to an input tensor in a neural network."""
 
@@ -160,7 +160,12 @@ class TransformerBlock(nn.Module):
         p = x.flatten(2).permute(2, 0, 1)
         return self.tr(p + self.linear(p)).permute(1, 2, 0).reshape(b, self.c2, w, h)
 
-
+#todo 3.2.2实现特征重建和通道交互的关键。
+'''
+Bottleneck 是 C3 模块的最小构建块
+提供可选的残差连接，兼顾参数效率和表达能力
+在 C3(n=3) 中，意味着连续堆叠多个 Bottleneck，加强非线性建模
+'''
 class Bottleneck(nn.Module):
     """A bottleneck layer with optional shortcut and group convolution for efficient feature extraction."""
 
@@ -178,6 +183,7 @@ class Bottleneck(nn.Module):
         """Processes input through two convolutions, optionally adds shortcut if channel dimensions match; input is a
         tensor.
         """
+       # 如果 shortcut = True 且 c1 == c2，就执行残差加法，否则直接返回卷积结果。
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
 
 
@@ -227,21 +233,43 @@ class CrossConv(nn.Module):
         """Performs feature sampling, expanding, and applies shortcut if channels match; expects `x` input tensor."""
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
 
+# todo 3.2.1 C3模块 部分残差连接 + 主干卷积块复用，减少计算成本，提升特征表达能力
+'''
+           x
+          / \
+      Conv  Conv
+       |     |
+    Bottleneck * n
+       |     |
+      Concat (2x c_)
+         |
+       Conv (c2)
 
+'''
 class C3(nn.Module):
+
     """Implements a CSP Bottleneck module with three convolutions for enhanced feature extraction in neural networks."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5): #shortcut：是否使用残差连接
         """Initializes C3 module with options for channel count, bottleneck repetition, shortcut usage, group
         convolutions, and expansion.
         """
+
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
-        self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2)
-        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
+        self.cv1 = Conv(c1, c_, 1, 1) # 左分支 对输入进行一次 1×1 卷积 → 降维为 c_
+        self.cv2 = Conv(c1, c_, 1, 1) # 右分支 直接对输入做 1×1 卷积 → 降维为 c_
+        self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2) 输出通道整合
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n))) #Bottleneck(c_, c_) 实际是一个轻量残差块
 
+        '''
+          将两个支路输出 concat 在通道维度（共 2c_）
+          再做 1×1 卷积（cv3）融合成输出通道 c2
+          CSP（Cross Stage Partial）思想来源于 CSPNet，核心目的是：
+          降低特征重复计算，提高模型效率
+          减少梯度流路径阻塞，增强训练稳定性
+          控制参数量和计算复杂度
+          '''
     def forward(self, x):
         """Performs forward propagation using concatenated outputs from two convolutions and a Bottleneck sequence."""
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
@@ -313,7 +341,7 @@ class SPP(nn.Module):
             warnings.simplefilter("ignore")  # suppress torch 1.9.0 max_pool2d() warning
             return self.cv2(torch.cat([x] + [m(x) for m in self.m], 1))
 
-
+#todo 3.3.1 轻量的空间金字塔池化层，提升感受野而不显著增加计算量
 class SPPF(nn.Module):
     """Implements a fast Spatial Pyramid Pooling (SPPF) layer for efficient feature extraction in YOLOv5 models."""
 
@@ -323,12 +351,14 @@ class SPPF(nn.Module):
         max pooling.
 
         Equivalent to SPP(k=(5, 9, 13)).
+
+        SPPF 是 YOLOv5 对传统 SPP 的轻量优化 通过复用同一个池化层，降低模型体积和延迟 保持较大感受野，有助于捕捉大目标/上下文
         """
         super().__init__()
         c_ = c1 // 2  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_ * 4, c2, 1, 1)
-        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+        self.cv1 = Conv(c1, c_, 1, 1)#1×1卷积，通道压缩 C → C/2
+        self.cv2 = Conv(c_ * 4, c2, 1, 1)#再通过一个 1×1 卷积融合通道 4C/2 → C2
+        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2) #池化（相同核大小）
 
     def forward(self, x):
         """Processes input through a series of convolutions and max pooling operations for feature extraction."""
@@ -336,7 +366,7 @@ class SPPF(nn.Module):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # suppress torch 1.9.0 max_pool2d() warning
             y1 = self.m(x)
-            y2 = self.m(y1)
+            y2 = self.m(y1)         #连续两次池化
             return self.cv2(torch.cat((x, y1, y2, self.m(y2)), 1))
 
 

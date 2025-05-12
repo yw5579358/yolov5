@@ -373,15 +373,15 @@ class ClassificationModel(BaseModel):
         """Creates a YOLOv5 classification model from a specified *.yaml configuration file."""
         self.model = None
 
-
+# todo 3.0.0 基于配置文件动态加载创建每一层对应的pytorch模块，并组装成一个完整的模型结构
 def parse_model(d, ch):
     """Parses a YOLOv5 model from a dict `d`, configuring layers based on input channels `ch` and model architecture."""
     LOGGER.info(f"\n{'':>3}{'from':>18}{'n':>3}{'params':>10}  {'module':<40}{'arguments':<30}")
     anchors, nc, gd, gw, act, ch_mul = (
-        d["anchors"],
-        d["nc"],
-        d["depth_multiple"],
-        d["width_multiple"],
+        d["anchors"],#先验框
+        d["nc"],#类别数
+        d["depth_multiple"], #模型深度缩放
+        d["width_multiple"],#每一层宽度缩放
         d.get("activation"),
         d.get("channel_multiple"),
     )
@@ -394,13 +394,14 @@ def parse_model(d, ch):
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
+    # f from n number重复次数，m module
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
-        m = eval(m) if isinstance(m, str) else m  # eval strings
+        m = eval(m) if isinstance(m, str) else m  # eval strings  # 模块名字符串转为类
         for j, a in enumerate(args):
             with contextlib.suppress(NameError):
-                args[j] = eval(a) if isinstance(a, str) else a  # eval strings
+                args[j] = eval(a) if isinstance(a, str) else a  # eval strings  # 将字符串参数也转成实际对象
 
-        n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain
+        n = n_ = max(round(n * gd), 1) if n > 1 else n  # depth gain 深度缩放 n重复次数，大于1会乘因子
         if m in {
             Conv,
             GhostConv,
@@ -421,13 +422,13 @@ def parse_model(d, ch):
             DWConvTranspose2d,
             C3x,
         }:
-            c1, c2 = ch[f], args[0]
+            c1, c2 = ch[f], args[0] #输入 和 输出通道数
             if c2 != no:  # if not output
-                c2 = make_divisible(c2 * gw, ch_mul)
+                c2 = make_divisible(c2 * gw, ch_mul) # 宽度缩放 并且将通道数向上取整为 8 的倍数。
 
-            args = [c1, c2, *args[1:]]
+            args = [c1, c2, *args[1:]] #输入，输出，【卷积核，步长，padding】
             if m in {BottleneckCSP, C3, C3TR, C3Ghost, C3x}:
-                args.insert(2, n)  # number of repeats
+                args.insert(2, n)  # number of repeats # Bottleneck 的数量，这些数内部包含多次重复的结构，需要将这个重复次数作为参数传递过去
                 n = 1
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
@@ -446,14 +447,21 @@ def parse_model(d, ch):
             c2 = ch[f] // args[0] ** 2
         else:
             c2 = ch[f]
-
+        #n>1  外部要重复n次某个模块，包起来
         m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace("__main__.", "")  # module type
-        np = sum(x.numel() for x in m_.parameters())  # number params
+        np = sum(x.numel() for x in m_.parameters())  # number params 计算当前这个模块（或模块组）里一共有多少个可训练参数
         m_.i, m_.f, m_.type, m_.np = i, f, t, np  # attach index, 'from' index, type, number params
         LOGGER.info(f"{i:>3}{str(f):>18}{n_:>3}{np:10.0f}  {t:<40}{str(args):<30}")  # print
+        '''
+        确定哪些中间层的输出需要“缓存”下来，供后面使用（如拼接、加法）。
+        例如在 YOLOv5 的 PAN 部分，某些层输入来自多个前面的层，必须提前保存。
+        save 是一个列表，记录了需要“保留输出”的层的索引。
+        '''
         save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
+        # 把构造好的模块加入模型的层列表。
         layers.append(m_)
+        #第一次时清空 ch，后续每次添加当前层的输出通道 c2。
         if i == 0:
             ch = []
         ch.append(c2)
