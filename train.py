@@ -42,7 +42,7 @@ FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
-ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
+ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative # 添加 YOLO 路径到系统路径
 
 import val as validate  # for end-of-epoch mAP
 from models.experimental import attempt_load
@@ -99,7 +99,7 @@ RANK = int(os.getenv("RANK", -1))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
 GIT_INFO = check_git_info()
 
-
+# todo 5训练开始
 def train(hyp, opt, device, callbacks):
     """
     Train a YOLOv5 model on a custom dataset using specified hyperparameters, options, and device, managing datasets,
@@ -223,7 +223,7 @@ def train(hyp, opt, device, callbacks):
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
     amp = check_amp(model)  # check AMP
 
-    # Freeze
+    # Freeze 冻结一些层，适用于前一学习
     freeze = [f"model.{x}." for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
     for k, v in model.named_parameters():
         v.requires_grad = True  # train all layers
@@ -243,7 +243,7 @@ def train(hyp, opt, device, callbacks):
 
     # Optimizer
     nbs = 64  # nominal batch size
-    accumulate = max(round(nbs / batch_size), 1)  # accumulate loss before optimizing
+    accumulate = max(round(nbs / batch_size), 1)  # accumulate loss before optimizing 梯度累积步数
     hyp["weight_decay"] *= batch_size * accumulate / nbs  # scale weight_decay
     optimizer = smart_optimizer(model, opt.optimizer, hyp["lr0"], hyp["momentum"], hyp["weight_decay"])
 
@@ -258,7 +258,7 @@ def train(hyp, opt, device, callbacks):
 
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
 
-    # EMA
+    # EMA EMA = Exponential Moving Average（指数滑动平均） 可以提高推理稳定性和最终性能
     ema = ModelEMA(model) if RANK in {-1, 0} else None
 
     # Resume
@@ -378,9 +378,10 @@ def train(hyp, opt, device, callbacks):
     )
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run("on_train_epoch_start")
+        #训练模式
         model.train()
 
-        # Update image weights (optional, single-GPU only)
+        # Update image weights (optional, single-GPU only) 图片权重更新
         if opt.image_weights:
             cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
             iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)  # image weights
@@ -390,7 +391,7 @@ def train(hyp, opt, device, callbacks):
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(3, device=device)  # mean losses
+        mloss = torch.zeros(3, device=device)  # mean losses 初始化损失函数 用来记录在当前epoch中损失的平均值 mloss 是一个大小为3的tensor，分别对应 box_loss, obj_loss 和 cls_loss。
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
@@ -398,12 +399,15 @@ def train(hyp, opt, device, callbacks):
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
+        '''
+        数据加载和训练：此循环遍历训练数据集中的每个批次，imgs 为输入图片，targets 为目标标签。通过 imgs.to(device) 将数据传输到 GPU。并且图像数据从 uint8 转换为 float32，并将像素值从 [0, 255] 映射到 [0, 1] 范围。
+        '''
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             callbacks.run("on_train_batch_start")
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
 
-            # Warmup
+            # Warmup 预热轮次下
             if ni <= nw:
                 xi = [0, nw]  # x interp
                 # compute_loss.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)
@@ -414,7 +418,7 @@ def train(hyp, opt, device, callbacks):
                     if "momentum" in x:
                         x["momentum"] = np.interp(ni, xi, [hyp["warmup_momentum"], hyp["momentum"]])
 
-            # Multi-scale
+            # Multi-scale 多尺度训练下
             if opt.multi_scale:
                 sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs  # size
                 sf = sz / max(imgs.shape[2:])  # scale factor
@@ -422,7 +426,7 @@ def train(hyp, opt, device, callbacks):
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
 
-            # Forward
+            # Forward 前向传播和损失计算 模型计算预测值 pred，并通过 compute_loss() 函数计算损失。自动混合精度（autocast），以加速训练并减少显存占用。
             with torch.cuda.amp.autocast(amp):
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
@@ -431,16 +435,18 @@ def train(hyp, opt, device, callbacks):
                 if opt.quad:
                     loss *= 4.0
 
-            # Backward
+            # Backward 反向传播
             scaler.scale(loss).backward()
-
-            # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
-            if ni - last_opt_step >= accumulate:
+            #反向传播和优化：使用 梯度缩放（scaler.scale()）来处理混合精度训练中的梯度，避免数值不稳定。 clip_grad_norm_() 用来防止梯度爆炸，scaler.step(optimizer) 用来更新模型参数。
+            # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html 参数优化
+            if ni - last_opt_step >= accumulate: #达到累积次数（accumulate），如果是，就进行一次优化步骤。多个 batch 累积之后再更新一次
+                # AMP 中梯度是经过 scaler.scale(loss).backward() 放大后的，需要先还原成原始比例再做剪裁（否则数值会失真）。
                 scaler.unscale_(optimizer)  # unscale gradients
+                #梯度裁剪（gradient clipping）。防止梯度爆炸，所有参数的梯度范数限制在 10.0 以下。
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
-                optimizer.zero_grad()
+                scaler.step(optimizer)  # optimizer.step 使用 AMP 的优化步骤。执行带缩放机制的 optimizer.step()，这是 AMP 的正确用法，不要直接用 optimizer.step()。
+                scaler.update()#更新内部动态缩放因子（scale factor），以适应训练中不同阶段的梯度分布。
+                optimizer.zero_grad() #清空上一轮的梯度（否则梯度会累加）。
                 if ema:
                     ema.update(model)
                 last_opt_step = ni
@@ -458,12 +464,34 @@ def train(hyp, opt, device, callbacks):
                     return
             # end batch ------------------------------------------------------------------------------------------------
 
-        # Scheduler
+        # Scheduler 在每个 epoch 结束时，调用调度器对当前学习率进行更新
         lr = [x["lr"] for x in optimizer.param_groups]  # for loggers
         scheduler.step()
 
+        '''
+        mAP 的组成部分
+1. IoU（Intersection over Union）
+表示预测框和真实框的重叠程度
+
+如果 IoU ≥ 阈值（如 0.5），我们就认为这个预测是 “正确的”（True Positive）
+
+2. Precision 和 Recall
+Precision（查准率）：预测中有多少是对的
+
+Recall（查全率）：所有正确答案中，有多少被找到了
+
+Recall
+3. AP（Average Precision）
+是 Precision-Recall 曲线下的面积（Area Under Curve）
+
+每个类别都可以单独计算一个 AP 值
+
+4. mAP（mean Average Precision）
+是所有类别的 AP 的平均值
+
+        '''
         if RANK in {-1, 0}:
-            # mAP
+            # mAP（平均平均精度） 每个 epoch 结束后评估模型的性能（即计算 mAP）
             callbacks.run("on_train_epoch_end", epoch=epoch)
             ema.update_attr(model, include=["yaml", "nc", "hyp", "names", "stride", "class_weights"])
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
@@ -513,7 +541,7 @@ def train(hyp, opt, device, callbacks):
                 del ckpt
                 callbacks.run("on_model_save", last, epoch, final_epoch, best_fitness, fi)
 
-        # EarlyStopping
+        # EarlyStopping 早停
         if RANK != -1:  # if DDP training
             broadcast_list = [stop if RANK == 0 else None]
             dist.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
@@ -528,7 +556,9 @@ def train(hyp, opt, device, callbacks):
         LOGGER.info(f"\n{epoch - start_epoch + 1} epochs completed in {(time.time() - t0) / 3600:.3f} hours.")
         for f in last, best:
             if f.exists():
+                #删除 .pt 文件中保存的优化器状态，只保留模型结构和权重。 方便部署
                 strip_optimizer(f)  # strip optimizers
+                #如果是 best.pt，则再次使用验证集验证这个模型，确保它的表现。
                 if f is best:
                     LOGGER.info(f"\nValidating {f}...")
                     results, _, _ = validate.run(
@@ -548,9 +578,8 @@ def train(hyp, opt, device, callbacks):
                     )  # val best model with plots
                     if is_coco:
                         callbacks.run("on_fit_epoch_end", list(mloss) + list(results) + lr, epoch, best_fitness, fi)
-
         callbacks.run("on_train_end", last, best, epoch, results)
-
+#清理现存
     torch.cuda.empty_cache()
     return results
 
@@ -629,7 +658,10 @@ def parse_opt(known=False):
 
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
-
+# todo 4.0 加载参数和配置
+# 设置环境和设备
+# 准备数据、模型、超参数
+# 最后调用 train() 正式开始训练
 def main(opt, callbacks=Callbacks()):
     """
     Runs the main entry point for training or hyperparameter evolution with specified options and optional callbacks.
@@ -646,12 +678,13 @@ def main(opt, callbacks=Callbacks()):
         For detailed usage, refer to:
         https://github.com/ultralytics/yolov5/tree/master/models
     """
+    #RANK：多卡训练时代表当前进程编号。-1 表示非分布式训练；0 表示主进程。
     if RANK in {-1, 0}:
         print_args(vars(opt))
         check_git_status()
         check_requirements(ROOT / "requirements.txt")
 
-    # Resume (from specified or most recent last.pt)
+    # Resume (from specified or most recent last.pt)  如果启用了断点续训（--resume），则会自动加载最近一次训练的 last.pt 模型对应的配置。
     if opt.resume and not check_comet_resume(opt) and not opt.evolve:
         last = Path(check_file(opt.resume) if isinstance(opt.resume, str) else get_latest_run())
         opt_yaml = last.parent.parent / "opt.yaml"  # train options yaml
@@ -666,6 +699,7 @@ def main(opt, callbacks=Callbacks()):
         if is_url(opt_data):
             opt.data = check_file(opt_data)  # avoid HUB resume auth timeout
     else:
+        # 非断点模式校验
         opt.data, opt.cfg, opt.hyp, opt.weights, opt.project = (
             check_file(opt.data),
             check_yaml(opt.cfg),
@@ -680,9 +714,11 @@ def main(opt, callbacks=Callbacks()):
             opt.exist_ok, opt.resume = opt.resume, False  # pass resume to exist_ok and disable resume
         if opt.name == "cfg":
             opt.name = Path(opt.cfg).stem  # use model.yaml as name
-        opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
+        opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok)) # increment_path()：自动创建一个唯一的保存目录，如 runs/train/exp2
 
-    # DDP mode
+
+
+    # DDP mode 多机多卡
     device = select_device(opt.device, batch_size=opt.batch_size)
     if LOCAL_RANK != -1:
         msg = "is not compatible with YOLOv5 Multi-GPU DDP training"
@@ -701,6 +737,28 @@ def main(opt, callbacks=Callbacks()):
     if not opt.evolve:
         train(opt.hyp, opt, device, callbacks)
 
+        '''
+        定义超参数搜索空间（meta）
+
+        初始化若干组随机参数（个体）
+
+        评估每组参数在训练中的表现（train() 返回 mAP）
+
+        进行选择、交叉、变异操作生成下一代
+
+        重复执行 N 代，记录进化结果
+
+        ✅ 重要设计：
+        meta：定义每个超参数的上下界，以及是否参与进化
+
+        hyp_GA：进化用的超参数子集
+
+        evolve_population.yaml：保存每代种群信息
+
+        evolve.csv：记录每次评估后的性能和参数值
+
+        plot_evolve()：画出性能随代数变化的趋势图
+        '''
     # Evolve hyperparameters (optional)
     else:
         # Hyperparameter evolution metadata (including this hyperparameter True-False, lower_limit, upper_limit)
